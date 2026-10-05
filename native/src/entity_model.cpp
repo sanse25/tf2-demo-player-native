@@ -188,4 +188,53 @@ std::vector<ModelInstance> EntityModelResolver::buildInstances(
   return instances;
 }
 
+bool buildEntityModelInstanceRows(
+    const float origin[3],
+    const float angles[3],
+    bool hasAngles,
+    const EntityModelWorldMap& world,
+    EntityModelInstanceRows& rows) {
+  if (!origin || !std::isfinite(origin[0]) || !std::isfinite(origin[1]) || !std::isfinite(origin[2])) return false;
+  if (!std::isfinite(world.centerX) || !std::isfinite(world.centerY) || !std::isfinite(world.minZ)
+      || !std::isfinite(world.horizontalScale) || !std::isfinite(world.zScale)
+      || !(world.horizontalScale > 0.0f) || !(world.zScale > 0.0f)) return false;
+  float m00 = 1.0f, m01 = 0.0f, m02 = 0.0f;
+  float m10 = 0.0f, m11 = 1.0f, m12 = 0.0f;
+  float m20 = 0.0f, m21 = 0.0f, m22 = 1.0f;
+  if (hasAngles) {
+    if (!angles || !std::isfinite(angles[0]) || !std::isfinite(angles[1]) || !std::isfinite(angles[2])) return false;
+    const float deg = 0.01745329252f;
+    const float sp = std::sin(angles[0] * deg), cp = std::cos(angles[0] * deg);
+    const float sy = std::sin(angles[1] * deg), cy = std::cos(angles[1] * deg);
+    const float sr = std::sin(angles[2] * deg), cr = std::cos(angles[2] * deg);
+    m00 = cp * cy;
+    m10 = cp * sy;
+    m20 = -sp;
+    m01 = sr * sp * cy + cr * -sy;
+    m11 = sr * sp * sy + cr * cy;
+    m21 = sr * cp;
+    m02 = cr * sp * cy + sr * sy;
+    m12 = cr * sp * sy + -sr * cy;
+    m22 = cr * cp;
+  }
+  const float horizontal = world.horizontalScale;
+  const float zScale = world.zScale;
+  rows.positionRows[0] = horizontal * m00;
+  rows.positionRows[1] = horizontal * m01;
+  rows.positionRows[2] = horizontal * m02;
+  rows.positionRows[3] = (origin[0] - world.centerX) * horizontal;
+  rows.positionRows[4] = horizontal * m10;
+  rows.positionRows[5] = horizontal * m11;
+  rows.positionRows[6] = horizontal * m12;
+  rows.positionRows[7] = (origin[1] - world.centerY) * horizontal;
+  rows.positionRows[8] = zScale * m20;
+  rows.positionRows[9] = zScale * m21;
+  rows.positionRows[10] = zScale * m22;
+  rows.positionRows[11] = (origin[2] - world.minZ) * zScale + 0.1f;
+  rows.normalRows[0] = m00; rows.normalRows[1] = m01; rows.normalRows[2] = m02;
+  rows.normalRows[3] = m10; rows.normalRows[4] = m11; rows.normalRows[5] = m12;
+  rows.normalRows[6] = m20; rows.normalRows[7] = m21; rows.normalRows[8] = m22;
+  return std::isfinite(rows.positionRows[3]) && std::isfinite(rows.positionRows[7]) && std::isfinite(rows.positionRows[11]);
+}
+
 } // namespace tf2::native

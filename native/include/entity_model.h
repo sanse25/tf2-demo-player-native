@@ -54,4 +54,26 @@ public:
     std::size_t maxInstances = kMaxInstances);
 };
 
+struct EntityModelWorldMap {
+  float centerX = 0.0f;
+  float centerY = 0.0f;
+  float minZ = 0.0f;
+  float horizontalScale = 1.0f;
+  float zScale = 1.0f;
+};
+
+struct EntityModelInstanceRows {
+  float positionRows[12] = {};
+  float normalRows[9] = {};
+};
+
+// One Source AngleMatrix plus the world-cube normalize, for dot(row, float4(local, 1)).
+// Normal rows are the same rotation without translation or scale.
+bool buildEntityModelInstanceRows(
+  const float origin[3],
+  const float angles[3],
+  bool hasAngles,
+  const EntityModelWorldMap& world,
+  EntityModelInstanceRows& rows);
+
 } // namespace tf2::native

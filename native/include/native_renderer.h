@@ -172,10 +172,12 @@ private:
   Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader_;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> worldVertexShader_;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> modelVertexShader_;
+  Microsoft::WRL::ComPtr<ID3D11VertexShader> entityModelVertexShader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> worldPixelShader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> modelPixelShader_;
   Microsoft::WRL::ComPtr<ID3D11InputLayout> worldInputLayout_;
   Microsoft::WRL::ComPtr<ID3D11InputLayout> modelInputLayout_;
+  Microsoft::WRL::ComPtr<ID3D11InputLayout> entityModelInputLayout_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> worldVertexBuffer_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> worldConstants_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> modelSkinningConstants_;
@@ -190,11 +192,19 @@ private:
   UINT modelVertexCount_ = 0;
   ModelGpuStatus modelGpuStatus_ = ModelGpuStatus::NotLoaded;
   struct EntityModelMesh {
-    std::vector<ModelDrawVertex> vertices;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> vertexBuffer;
+    UINT vertexCount = 0;
+  };
+  struct EntityModelDrawRange {
+    ID3D11Buffer* vertexBuffer = nullptr;
+    UINT vertexCount = 0;
+    UINT instanceStart = 0;
+    UINT instanceCount = 0;
   };
   std::unordered_map<std::string, EntityModelMesh> entityModelMeshes_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> entityModelVertexBuffer_;
-  std::size_t entityModelVertexCapacity_ = 0;
+  std::vector<EntityModelDrawRange> entityModelDrawRanges_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> entityModelInstanceBuffer_;
+  std::size_t entityModelInstanceCapacity_ = 0;
   UINT entityModelVertexCount_ = 0;
   std::size_t entityModelInstanceCount_ = 0;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader_;

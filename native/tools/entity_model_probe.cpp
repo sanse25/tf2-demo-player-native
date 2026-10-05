@@ -3,8 +3,10 @@
 #include "entity_model.h"
 #include "model_loader.h"
 
+#include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -60,6 +62,60 @@ bool runSelfTest() {
   states[3] = state;
   const auto bounded = tf2::native::EntityModelResolver::buildInstances(flood, states, {}, 2048);
   if (bounded.size() > tf2::native::EntityModelResolver::kMaxInstances) return false;
+
+  const auto near = [](float actual, float expected) {
+    return std::fabs(actual - expected) <= 1.0e-4f;
+  };
+  const auto applyPosition = [](const tf2::native::EntityModelInstanceRows& rows, float x, float y, float z, float out[3]) {
+    const float point[4] = {x, y, z, 1.0f};
+    for (int row = 0; row < 3; ++row) {
+      out[row] = rows.positionRows[row * 4] * point[0] + rows.positionRows[row * 4 + 1] * point[1]
+        + rows.positionRows[row * 4 + 2] * point[2] + rows.positionRows[row * 4 + 3] * point[3];
+    }
+  };
+  const auto applyNormal = [](const tf2::native::EntityModelInstanceRows& rows, float x, float y, float z, float out[3]) {
+    for (int row = 0; row < 3; ++row) {
+      out[row] = rows.normalRows[row * 3] * x + rows.normalRows[row * 3 + 1] * y + rows.normalRows[row * 3 + 2] * z;
+    }
+  };
+  tf2::native::EntityModelWorldMap world;
+  world.centerX = 10.0f;
+  world.centerY = 20.0f;
+  world.minZ = 5.0f;
+  world.horizontalScale = 0.01f;
+  world.zScale = 0.02f;
+  const float worldOrigin[3] = {100.0f, 200.0f, 50.0f};
+  tf2::native::EntityModelInstanceRows rows;
+  if (!tf2::native::buildEntityModelInstanceRows(worldOrigin, nullptr, false, world, rows)) return false;
+  float mapped[3] = {};
+  applyPosition(rows, 1.0f, 2.0f, 3.0f, mapped);
+  if (!near(mapped[0], 0.91f) || !near(mapped[1], 1.82f) || !near(mapped[2], 1.06f)) return false;
+  float normal[3] = {};
+  applyNormal(rows, 0.0f, 1.0f, 0.0f, normal);
+  if (!near(normal[0], 0.0f) || !near(normal[1], 1.0f) || !near(normal[2], 0.0f)) return false;
+  if (!near(rows.positionRows[0], world.horizontalScale) || !near(rows.normalRows[0], 1.0f)) return false;
+
+  const float yaw90[3] = {0.0f, 90.0f, 0.0f};
+  const float yawOrigin[3] = {10.0f, 0.0f, 0.0f};
+  tf2::native::EntityModelWorldMap unit;
+  unit.horizontalScale = 1.0f;
+  unit.zScale = 1.0f;
+  tf2::native::EntityModelInstanceRows yawRows;
+  if (!tf2::native::buildEntityModelInstanceRows(yawOrigin, yaw90, true, unit, yawRows)) return false;
+  applyPosition(yawRows, 1.0f, 0.0f, 0.0f, mapped);
+  if (!near(mapped[0], 10.0f) || !near(mapped[1], 1.0f) || !near(mapped[2], 0.1f)) return false;
+  applyNormal(yawRows, 1.0f, 0.0f, 0.0f, normal);
+  if (!near(normal[0], 0.0f) || !near(normal[1], 1.0f) || !near(normal[2], 0.0f)) return false;
+
+  const float pitch90[3] = {90.0f, 0.0f, 0.0f};
+  tf2::native::EntityModelInstanceRows pitchRows;
+  const float zero[3] = {};
+  if (!tf2::native::buildEntityModelInstanceRows(zero, pitch90, true, unit, pitchRows)) return false;
+  applyPosition(pitchRows, 0.0f, 0.0f, 1.0f, mapped);
+  if (!near(mapped[0], 1.0f) || !near(mapped[1], 0.0f) || !near(mapped[2], 0.1f)) return false;
+
+  const float badOrigin[3] = {0.0f, 0.0f, std::numeric_limits<float>::quiet_NaN()};
+  if (tf2::native::buildEntityModelInstanceRows(badOrigin, nullptr, false, unit, rows)) return false;
   return true;
 }
 

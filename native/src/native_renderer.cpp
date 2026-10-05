@@ -1,5 +1,7 @@
 #include "native_renderer.h"
 
+#include "entity_model.h"
+
 #include <algorithm>
 #include <array>
 #include <d3dcompiler.h>
@@ -15,6 +17,17 @@ namespace tf2::native {
 
 namespace {
 struct WorldVertex { float x, y, z; float r, g, b, a; float u, v; float nx, ny, nz; };
+struct EntityModelGpuVertex { float x, y, z; float nx, ny, nz; float u, v; };
+struct EntityModelInstanceGpu {
+  float position[3][4];
+  float normal[3][4];
+  float color[4];
+};
+static_assert(sizeof(EntityModelGpuVertex) == 32, "entity mesh vertex stride");
+static_assert(offsetof(EntityModelGpuVertex, nx) == 12, "entity mesh normal offset");
+static_assert(offsetof(EntityModelGpuVertex, u) == 24, "entity mesh uv offset");
+static_assert(sizeof(EntityModelInstanceGpu) == 112, "entity instance stride");
+static_assert(offsetof(EntityModelInstanceGpu, color) == 96, "entity instance color offset");
 struct ModelGpuVertex {
   float x, y, z; float r, g, b, a; float u, v; float nx, ny, nz;
   float weights[3]; std::uint8_t boneIndices[3]; std::uint8_t boneCount; std::uint8_t padding[1];
@@ -263,10 +276,52 @@ float4 main(Input input) : SV_TARGET {
   return float4(input.colour.rgb * lighting, input.colour.a);
 }
 )HLSL";
+  static constexpr char entityModelVertexSource[] = R"HLSL(
+cbuffer WorldConstants : register(b0) {
+  row_major float4x4 mvp;
+  float4 lightDirectionAndMode;
+  float4 cameraPositionAndSpecular;
+  float4 materialFeatures;
+  float4 lightmapFeatures;
+};
+struct Input {
+  float3 position : POSITION;
+  float3 normal : NORMAL0;
+  float2 uv : TEXCOORD0;
+  float4 row0 : TEXCOORD1;
+  float4 row1 : TEXCOORD2;
+  float4 row2 : TEXCOORD3;
+  float4 nrow0 : TEXCOORD4;
+  float4 nrow1 : TEXCOORD5;
+  float4 nrow2 : TEXCOORD6;
+  float4 colour : COLOR0;
+};
+struct Output {
+  float4 position : SV_POSITION;
+  float4 colour : COLOR0;
+  float2 uv : TEXCOORD0;
+  float3 normal : NORMAL0;
+  float3 worldPosition : TEXCOORD1;
+};
+Output main(Input input) {
+  Output output;
+  float4 local = float4(input.position, 1.0);
+  float3 mapped = float3(dot(input.row0, local), dot(input.row1, local), dot(input.row2, local));
+  output.position = mul(float4(mapped, 1.0), mvp);
+  output.colour = input.colour;
+  output.uv = input.uv;
+  float3 rotated = float3(dot(input.nrow0.xyz, input.normal), dot(input.nrow1.xyz, input.normal), dot(input.nrow2.xyz, input.normal));
+  float lengthSquared = dot(rotated, rotated);
+  output.normal = (lengthSquared > 1e-8 && lengthSquared < 1e8) ? rotated * rsqrt(lengthSquared) : float3(0.0, 0.0, 1.0);
+  output.worldPosition = mapped;
+  return output;
+}
+)HLSL";
   Microsoft::WRL::ComPtr<ID3DBlob> worldVertexBytecode;
   Microsoft::WRL::ComPtr<ID3DBlob> worldPixelBytecode;
   Microsoft::WRL::ComPtr<ID3DBlob> modelVertexBytecode;
   Microsoft::WRL::ComPtr<ID3DBlob> modelPixelBytecode;
+  Microsoft::WRL::ComPtr<ID3DBlob> entityModelVertexBytecode;
   HRESULT worldShaderResult = S_OK;
   const bool worldShadersCompiled = compileShader(worldVertexSource, "main", "vs_5_0", worldVertexBytecode, &worldShaderResult)
       && compileShader(worldPixelSource, "main", "ps_5_0", worldPixelBytecode, &worldShaderResult);
@@ -278,6 +333,11 @@ float4 main(Input input) : SV_TARGET {
   }
   if (!compileShader(modelPixelSource, "main", "ps_5_0", modelPixelBytecode, &modelShaderResult)) {
     lastError_ = modelShaderResult;
+    return false;
+  }
+  HRESULT entityShaderResult = S_OK;
+  if (!compileShader(entityModelVertexSource, "main", "vs_5_0", entityModelVertexBytecode, &entityShaderResult)) {
+    lastError_ = entityShaderResult;
     return false;
   }
   if (FAILED(device_->CreateVertexShader(vertexBytecode->GetBufferPointer(), vertexBytecode->GetBufferSize(),
@@ -314,6 +374,31 @@ float4 main(Input input) : SV_TARGET {
       modelVertexBytecode->GetBufferPointer(), modelVertexBytecode->GetBufferSize(), modelInputLayout_.GetAddressOf()));
     if (!modelLayoutCreated) {
       worldVertexShader_.Reset(); worldPixelShader_.Reset(); worldInputLayout_.Reset(); modelVertexShader_.Reset(); modelPixelShader_.Reset(); modelInputLayout_.Reset();
+      lastError_ = E_FAIL;
+      return false;
+    }
+    const D3D11_INPUT_ELEMENT_DESC entityElements[] = {
+      {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+      {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+      {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
+      {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+      {"TEXCOORD", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+      {"TEXCOORD", 3, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+      {"TEXCOORD", 4, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+      {"TEXCOORD", 5, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 64, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+      {"TEXCOORD", 6, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 80, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 96, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+    };
+    const bool entityShaderCreated = SUCCEEDED(device_->CreateVertexShader(
+      entityModelVertexBytecode->GetBufferPointer(), entityModelVertexBytecode->GetBufferSize(),
+      nullptr, entityModelVertexShader_.GetAddressOf()));
+    const bool entityLayoutCreated = entityShaderCreated && SUCCEEDED(device_->CreateInputLayout(
+      entityElements, 10, entityModelVertexBytecode->GetBufferPointer(), entityModelVertexBytecode->GetBufferSize(),
+      entityModelInputLayout_.GetAddressOf()));
+    if (!entityLayoutCreated) {
+      worldVertexShader_.Reset(); worldPixelShader_.Reset(); worldInputLayout_.Reset();
+      modelVertexShader_.Reset(); modelPixelShader_.Reset(); modelInputLayout_.Reset();
+      entityModelVertexShader_.Reset(); entityModelInputLayout_.Reset();
       lastError_ = E_FAIL;
       return false;
     }
@@ -909,93 +994,137 @@ void Renderer::setEntityMarkers(const std::vector<EntityMarker>& markers) {
 }
 
 bool Renderer::uploadEntityModelMesh(const std::string& cacheKey, const std::vector<ModelDrawVertex>& vertices) {
-  if (cacheKey.empty() || vertices.size() < 3) { lastError_ = E_INVALIDARG; return false; }
+  if (!device_ || cacheKey.empty() || vertices.size() < 3) { lastError_ = E_INVALIDARG; return false; }
   if (entityModelMeshes_.size() >= 64 && entityModelMeshes_.find(cacheKey) == entityModelMeshes_.end()) {
     lastError_ = E_OUTOFMEMORY;
     return false;
   }
-  EntityModelMesh mesh;
   const auto limit = std::min<std::size_t>(vertices.size(), 12000u);
-  mesh.vertices.assign(vertices.begin(), vertices.begin() + static_cast<std::ptrdiff_t>(limit));
+  const auto count = limit - (limit % 3);
+  if (count < 3) { lastError_ = E_INVALIDARG; return false; }
+  std::vector<EntityModelGpuVertex> local(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto& source = vertices[i];
+    local[i] = EntityModelGpuVertex{
+      source.position[0], source.position[1], source.position[2],
+      source.normal[0], source.normal[1], source.normal[2],
+      source.texcoord[0], source.texcoord[1]};
+  }
+  D3D11_BUFFER_DESC description{};
+  description.ByteWidth = static_cast<UINT>(count * sizeof(EntityModelGpuVertex));
+  description.Usage = D3D11_USAGE_IMMUTABLE;
+  description.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+  D3D11_SUBRESOURCE_DATA data{};
+  data.pSysMem = local.data();
+  Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+  if (FAILED(device_->CreateBuffer(&description, &data, buffer.GetAddressOf()))) {
+    lastError_ = E_FAIL;
+    return false;
+  }
+  EntityModelMesh mesh;
+  mesh.vertexBuffer = std::move(buffer);
+  mesh.vertexCount = static_cast<UINT>(count);
   entityModelMeshes_[cacheKey] = std::move(mesh);
+  entityModelDrawRanges_.clear();
+  entityModelVertexCount_ = 0;
+  entityModelInstanceCount_ = 0;
   return true;
 }
 
 void Renderer::setEntityModelInstances(const std::vector<EntityModelDrawInstance>& instances) {
   entityModelVertexCount_ = 0;
   entityModelInstanceCount_ = 0;
-  if (!device_ || !worldBoundsValid_ || instances.empty() || entityModelMeshes_.empty()) return;
+  entityModelDrawRanges_.clear();
+  if (!device_ || !context_ || !worldBoundsValid_ || instances.empty() || entityModelMeshes_.empty()) return;
+  if (!std::isfinite(worldCenterX_) || !std::isfinite(worldCenterY_) || !std::isfinite(worldMinZ_)
+      || !std::isfinite(worldSpanZ_) || !std::isfinite(worldHorizontalScale_)
+      || worldSpanZ_ <= 0.0f || worldHorizontalScale_ <= 0.0f) return;
+  EntityModelWorldMap world;
+  world.centerX = worldCenterX_;
+  world.centerY = worldCenterY_;
+  world.minZ = worldMinZ_;
+  world.horizontalScale = worldHorizontalScale_;
+  world.zScale = 0.8f / worldSpanZ_;
   constexpr std::size_t maxInstances = 96;
-  constexpr std::size_t maxVertices = 180000;
-  std::vector<WorldVertex> vertices;
-  vertices.reserve(65536);
-  const auto toWorld = [this](float x, float y, float z) {
-    return DirectX::XMFLOAT3((x - worldCenterX_) * worldHorizontalScale_,
-      (y - worldCenterY_) * worldHorizontalScale_,
-      (z - worldMinZ_) / worldSpanZ_ * 0.8f + 0.1f);
+  struct Bucket {
+    ID3D11Buffer* vertexBuffer = nullptr;
+    UINT vertexCount = 0;
+    std::vector<EntityModelInstanceGpu> items;
   };
-  const auto rotate = [](float x, float y, float z, float pitchDeg, float yawDeg, float rollDeg,
-      float& ox, float& oy, float& oz) {
-    const float deg = 0.01745329252f;
-    const float sp = std::sin(pitchDeg * deg), cp = std::cos(pitchDeg * deg);
-    const float sy = std::sin(yawDeg * deg), cy = std::cos(yawDeg * deg);
-    const float sr = std::sin(rollDeg * deg), cr = std::cos(rollDeg * deg);
-    const float m00 = cp * cy;
-    const float m10 = cp * sy;
-    const float m20 = -sp;
-    const float m01 = sr * sp * cy + cr * -sy;
-    const float m11 = sr * sp * sy + cr * cy;
-    const float m21 = sr * cp;
-    const float m02 = cr * sp * cy + sr * sy;
-    const float m12 = cr * sp * sy + -sr * cy;
-    const float m22 = cr * cp;
-    ox = m00 * x + m01 * y + m02 * z;
-    oy = m10 * x + m11 * y + m12 * z;
-    oz = m20 * x + m21 * y + m22 * z;
-  };
-  for (std::size_t i = 0; i < instances.size() && i < maxInstances; ++i) {
+  std::vector<Bucket> buckets;
+  std::unordered_map<std::string, std::size_t> bucketOf;
+  buckets.reserve(8);
+  bucketOf.reserve(8);
+  std::size_t accepted = 0;
+  for (std::size_t i = 0; i < instances.size() && accepted < maxInstances; ++i) {
     const auto& instance = instances[i];
     if (instance.cacheKey.empty()) continue;
-    if (!std::isfinite(instance.origin[0]) || !std::isfinite(instance.origin[1]) || !std::isfinite(instance.origin[2])) continue;
-    auto mesh = entityModelMeshes_.find(instance.cacheKey);
-    if (mesh == entityModelMeshes_.end() || mesh->second.vertices.size() < 3) continue;
-    const float pitch = instance.hasAngles ? instance.angles[0] : 0.0f;
-    const float yaw = instance.hasAngles ? instance.angles[1] : 0.0f;
-    const float roll = instance.hasAngles ? instance.angles[2] : 0.0f;
-    const auto remaining = maxVertices - vertices.size();
-    const auto take = std::min(mesh->second.vertices.size() - mesh->second.vertices.size() % 3, remaining - remaining % 3);
-    if (take < 3) break;
-    for (std::size_t v = 0; v < take; ++v) {
-      const auto& source = mesh->second.vertices[v];
-      float wx = source.position[0], wy = source.position[1], wz = source.position[2];
-      if (instance.hasAngles) rotate(source.position[0], source.position[1], source.position[2], pitch, yaw, roll, wx, wy, wz);
-      wx += instance.origin[0];
-      wy += instance.origin[1];
-      wz += instance.origin[2];
-      const auto mapped = toWorld(wx, wy, wz);
-      float nx = source.normal[0], ny = source.normal[1], nz = source.normal[2];
-      if (instance.hasAngles) rotate(source.normal[0], source.normal[1], source.normal[2], pitch, yaw, roll, nx, ny, nz);
-      vertices.push_back(WorldVertex{mapped.x, mapped.y, mapped.z,
-        instance.color[0], instance.color[1], instance.color[2], instance.color[3],
-        source.texcoord[0], source.texcoord[1], nx, ny, nz});
+    const auto mesh = entityModelMeshes_.find(instance.cacheKey);
+    if (mesh == entityModelMeshes_.end() || !mesh->second.vertexBuffer
+        || mesh->second.vertexCount < 3 || (mesh->second.vertexCount % 3) != 0) continue;
+    EntityModelInstanceRows rows;
+    if (!buildEntityModelInstanceRows(instance.origin, instance.angles, instance.hasAngles, world, rows)) continue;
+    const auto inserted = bucketOf.emplace(instance.cacheKey, buckets.size());
+    if (inserted.second) {
+      Bucket created;
+      created.vertexBuffer = mesh->second.vertexBuffer.Get();
+      created.vertexCount = mesh->second.vertexCount;
+      buckets.push_back(std::move(created));
     }
-    ++entityModelInstanceCount_;
+    EntityModelInstanceGpu gpu{};
+    for (int row = 0; row < 3; ++row) {
+      for (int column = 0; column < 4; ++column) gpu.position[row][column] = rows.positionRows[row * 4 + column];
+      for (int column = 0; column < 3; ++column) gpu.normal[row][column] = rows.normalRows[row * 3 + column];
+    }
+    gpu.color[0] = instance.color[0];
+    gpu.color[1] = instance.color[1];
+    gpu.color[2] = instance.color[2];
+    gpu.color[3] = instance.color[3];
+    buckets[inserted.first->second].items.push_back(gpu);
+    ++accepted;
   }
-  if (vertices.empty()) return;
-  if (!entityModelVertexBuffer_ || entityModelVertexCapacity_ < vertices.size()) {
+  if (accepted == 0 || buckets.empty()) return;
+  std::vector<EntityModelInstanceGpu> packed;
+  packed.reserve(accepted);
+  entityModelDrawRanges_.reserve(buckets.size());
+  UINT uniqueVertices = 0;
+  for (const auto& bucket : buckets) {
+    if (bucket.items.empty() || bucket.vertexBuffer == nullptr || bucket.vertexCount < 3) continue;
+    EntityModelDrawRange range;
+    range.vertexBuffer = bucket.vertexBuffer;
+    range.vertexCount = bucket.vertexCount;
+    range.instanceStart = static_cast<UINT>(packed.size());
+    range.instanceCount = static_cast<UINT>(bucket.items.size());
+    packed.insert(packed.end(), bucket.items.begin(), bucket.items.end());
+    entityModelDrawRanges_.push_back(range);
+    uniqueVertices += bucket.vertexCount;
+  }
+  if (packed.empty()) {
+    entityModelDrawRanges_.clear();
+    return;
+  }
+  if (!entityModelInstanceBuffer_ || entityModelInstanceCapacity_ < packed.size()) {
     D3D11_BUFFER_DESC description{};
-    description.ByteWidth = static_cast<UINT>(vertices.size() * sizeof(WorldVertex));
+    const auto capacity = std::max(packed.size(), std::size_t{96});
+    description.ByteWidth = static_cast<UINT>(capacity * sizeof(EntityModelInstanceGpu));
     description.Usage = D3D11_USAGE_DYNAMIC;
     description.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     description.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    if (FAILED(device_->CreateBuffer(&description, nullptr, entityModelVertexBuffer_.ReleaseAndGetAddressOf()))) return;
-    entityModelVertexCapacity_ = vertices.size();
+    if (FAILED(device_->CreateBuffer(&description, nullptr, entityModelInstanceBuffer_.ReleaseAndGetAddressOf()))) {
+      entityModelDrawRanges_.clear();
+      return;
+    }
+    entityModelInstanceCapacity_ = capacity;
   }
   D3D11_MAPPED_SUBRESOURCE mapped{};
-  if (FAILED(context_->Map(entityModelVertexBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
-  std::memcpy(mapped.pData, vertices.data(), vertices.size() * sizeof(WorldVertex));
-  context_->Unmap(entityModelVertexBuffer_.Get(), 0);
-  entityModelVertexCount_ = static_cast<UINT>(vertices.size());
+  if (FAILED(context_->Map(entityModelInstanceBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+    entityModelDrawRanges_.clear();
+    return;
+  }
+  std::memcpy(mapped.pData, packed.data(), packed.size() * sizeof(EntityModelInstanceGpu));
+  context_->Unmap(entityModelInstanceBuffer_.Get(), 0);
+  entityModelVertexCount_ = uniqueVertices;
+  entityModelInstanceCount_ = packed.size();
 }
 
 bool Renderer::saveCameraPreset(std::size_t slot) {
@@ -1165,13 +1294,13 @@ bool Renderer::draw(float clearRed, float clearGreen, float clearBlue) {
     context_->Draw(entityMarkerVertexCount_, 0);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   }
-  if (entityModelVertexBuffer_ && entityModelVertexCount_ > 0
-      && worldVertexShader_ && worldPixelShader_ && worldInputLayout_ && worldConstants_) {
-    const UINT modelStride = sizeof(WorldVertex), modelOffset = 0;
-    auto* modelBuffer = entityModelVertexBuffer_.Get();
-    context_->IASetInputLayout(worldInputLayout_.Get());
-    context_->IASetVertexBuffers(0, 1, &modelBuffer, &modelStride, &modelOffset);
-    context_->VSSetShader(worldVertexShader_.Get(), nullptr, 0);
+  if (!entityModelDrawRanges_.empty() && entityModelInstanceBuffer_ && entityModelInstanceCount_ > 0
+      && entityModelVertexShader_ && entityModelInputLayout_ && worldPixelShader_ && worldConstants_) {
+    const UINT strides[2] = { sizeof(EntityModelGpuVertex), sizeof(EntityModelInstanceGpu) };
+    const UINT offsets[2] = { 0, 0 };
+    context_->IASetInputLayout(entityModelInputLayout_.Get());
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->VSSetShader(entityModelVertexShader_.Get(), nullptr, 0);
     auto* worldConstants = worldConstants_.Get();
     context_->VSSetConstantBuffers(0, 1, &worldConstants);
     context_->PSSetShader(worldPixelShader_.Get(), nullptr, 0);
@@ -1183,8 +1312,13 @@ bool Renderer::draw(float clearRed, float clearGreen, float clearBlue) {
     context_->PSSetShaderResources(1, 1, &bumpView);
     context_->PSSetShaderResources(2, 1, &envView);
     context_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
-    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context_->Draw(entityModelVertexCount_, 0);
+    auto* instanceBuffer = entityModelInstanceBuffer_.Get();
+    for (const auto& range : entityModelDrawRanges_) {
+      if (!range.vertexBuffer || range.vertexCount < 3 || range.instanceCount == 0) continue;
+      ID3D11Buffer* buffers[2] = { range.vertexBuffer, instanceBuffer };
+      context_->IASetVertexBuffers(0, 2, buffers, strides, offsets);
+      context_->DrawInstanced(range.vertexCount, range.instanceCount, 0, range.instanceStart);
+    }
   }
   if (projectileVertexBuffer_ && projectileVertexCount_ > 0 && worldVertexShader_ && worldPixelShader_
       && worldInputLayout_ && worldConstants_) {
@@ -1242,10 +1376,11 @@ void Renderer::shutdown() {
   entityMarkerVertexBuffer_.Reset();
   entityMarkerVertexCapacity_ = 0;
   entityMarkerVertexCount_ = 0;
-  entityModelVertexBuffer_.Reset();
-  entityModelVertexCapacity_ = 0;
+  entityModelInstanceBuffer_.Reset();
+  entityModelInstanceCapacity_ = 0;
   entityModelVertexCount_ = 0;
   entityModelInstanceCount_ = 0;
+  entityModelDrawRanges_.clear();
   entityModelMeshes_.clear();
   modelVertexBuffer_.Reset();
   modelGpuStatus_ = ModelGpuStatus::NotLoaded;
@@ -1256,9 +1391,11 @@ void Renderer::shutdown() {
   modelSkinningConstants_.Reset();
   worldInputLayout_.Reset();
   modelInputLayout_.Reset();
+  entityModelInputLayout_.Reset();
   worldPixelShader_.Reset();
   worldVertexShader_.Reset();
   modelVertexShader_.Reset();
+  entityModelVertexShader_.Reset();
   modelPixelShader_.Reset();
   worldVertexCount_ = 0;
   projectileVertexCount_ = 0;
