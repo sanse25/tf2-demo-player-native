@@ -14,6 +14,7 @@ add_executable(tf2_demo_native WIN32
   src/vpk_archive.cpp
   src/vtf_texture.cpp
   src/model_loader.cpp
+  src/entity_model.cpp
   src/vmt_material.cpp
   src/audio_resource.cpp
   src/audio_player.cpp
@@ -62,6 +63,10 @@ set_target_properties(texture_quad_probe PROPERTIES WIN32_EXECUTABLE OFF)
 add_executable(model_pose_probe tools/model_pose_probe.cpp src/model_loader.cpp src/asset_root.cpp src/vpk_archive.cpp src/demo_header.cpp src/item_schema.cpp)
 target_include_directories(model_pose_probe PRIVATE include)
 set_target_properties(model_pose_probe PROPERTIES WIN32_EXECUTABLE OFF)
+
+add_executable(entity_model_probe tools/entity_model_probe.cpp src/entity_model.cpp src/model_loader.cpp src/asset_root.cpp src/vpk_archive.cpp src/demo_header.cpp src/item_schema.cpp)
+target_include_directories(entity_model_probe PRIVATE include)
+set_target_properties(entity_model_probe PROPERTIES WIN32_EXECUTABLE OFF)
 
 add_executable(viewmodel_fov_probe tools/viewmodel_fov_probe.cpp)
 target_include_directories(viewmodel_fov_probe PRIVATE include)

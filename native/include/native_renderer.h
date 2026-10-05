@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <wrl/client.h>
 
@@ -64,6 +65,14 @@ struct EntityMarker {
   float color[4] = {0.2f, 0.9f, 0.35f, 0.0f};
 };
 
+struct EntityModelDrawInstance {
+  std::string cacheKey;
+  float origin[3] = {};
+  float angles[3] = {};
+  bool hasAngles = false;
+  float color[4] = {0.72f, 0.72f, 0.76f, 1.0f};
+};
+
 struct WorldMaterialParams {
   bool bumpMapping = false;
   bool envMap = false;
@@ -103,6 +112,11 @@ public:
   void setProjectileTimeline(const std::vector<ProjectileTimelineEvent>& events, std::int32_t tick);
   void setCpuParticleTimeline(const std::vector<ProjectileTimelineEvent>& events, std::int32_t tick);
   void setEntityMarkers(const std::vector<EntityMarker>& markers);
+  bool uploadEntityModelMesh(const std::string& cacheKey, const std::vector<ModelDrawVertex>& vertices);
+  void setEntityModelInstances(const std::vector<EntityModelDrawInstance>& instances);
+  std::size_t entityModelMeshCount() const { return entityModelMeshes_.size(); }
+  std::size_t entityModelInstanceCount() const { return entityModelInstanceCount_; }
+  std::size_t entityModelVertexCount() const { return entityModelVertexCount_; }
   std::size_t projectileVertexCount() const { return projectileVertexCount_; }
   const WorldMaterialParams& worldMaterialParams() const { return worldMaterialParams_; }
   WorldLightmapStatus worldLightmapStatus() const { return worldLightmapStatus_; }
@@ -175,6 +189,14 @@ private:
   Microsoft::WRL::ComPtr<ID3D11Buffer> modelVertexBuffer_;
   UINT modelVertexCount_ = 0;
   ModelGpuStatus modelGpuStatus_ = ModelGpuStatus::NotLoaded;
+  struct EntityModelMesh {
+    std::vector<ModelDrawVertex> vertices;
+  };
+  std::unordered_map<std::string, EntityModelMesh> entityModelMeshes_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> entityModelVertexBuffer_;
+  std::size_t entityModelVertexCapacity_ = 0;
+  UINT entityModelVertexCount_ = 0;
+  std::size_t entityModelInstanceCount_ = 0;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader_;
   Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
   Texture2D texture_;

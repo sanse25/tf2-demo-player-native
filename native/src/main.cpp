@@ -8,6 +8,7 @@
 #include "demo_header.h"
 #include "audio_player.h"
 #include "model_loader.h"
+#include "entity_model.h"
 #include "item_schema.h"
 #include "native_ui.h"
 
@@ -579,6 +580,47 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
       }
     }
   }
+  tf2::native::ModelRenderRequestStats modelRequestStats;
+  std::vector<tf2::native::ModelRenderRequest> modelRenderRequests;
+  struct PreparedEntityMesh {
+    std::string path;
+    std::string cacheKey;
+    std::vector<tf2::native::ModelDrawVertex> vertices;
+  };
+  std::vector<PreparedEntityMesh> preparedEntityMeshes;
+  std::unordered_map<std::string, std::string> entityMeshKeyByPath;
+  if (assets.valid()) {
+    modelRenderRequests = tf2::native::ModelLoader::buildRenderRequests(
+      assets, demoNetworkSummary.assetReferences, itemSchema.get(), &modelRequestStats);
+    std::vector<tf2::native::AssetReference> classFallbacks;
+    for (std::int64_t tfClass = 1; tfClass <= 9; ++tfClass) {
+      tf2::native::AssetReference fallback;
+      fallback.hasModelPath = true;
+      fallback.modelPath = tf2::native::EntityModelResolver::defaultPlayerModelPath(tfClass);
+      classFallbacks.push_back(std::move(fallback));
+    }
+    auto classRequests = tf2::native::ModelLoader::buildRenderRequests(
+      assets, classFallbacks, itemSchema.get(), nullptr);
+    std::vector<tf2::native::ModelRenderRequest> meshSource = modelRenderRequests;
+    meshSource.insert(meshSource.end(), classRequests.begin(), classRequests.end());
+    std::unordered_set<std::string> preparedKeys;
+    preparedEntityMeshes.reserve(64);
+    for (auto& request : meshSource) {
+      if (!request.renderable || request.inspection.viewModelPathDetected) continue;
+      if (preparedKeys.count(request.cacheKey)) continue;
+      std::string meshError;
+      if (!tf2::native::ModelLoader::buildBindPoseMeshLod0(request.inspection.metadata, meshError)
+          || request.inspection.metadata.bindPoseVertices.size() < 3) continue;
+      PreparedEntityMesh prepared;
+      prepared.path = request.modelPath;
+      prepared.cacheKey = request.cacheKey;
+      prepared.vertices = std::move(request.inspection.metadata.bindPoseVertices);
+      preparedKeys.insert(request.cacheKey);
+      entityMeshKeyByPath[request.modelPath] = request.cacheKey;
+      preparedEntityMeshes.push_back(std::move(prepared));
+      if (preparedEntityMeshes.size() >= 64) break;
+    }
+  }
   std::size_t indexedVpkEntries = 0;
   std::vector<std::uint8_t> displayRgba;
   UINT displayWidth = 0;
@@ -998,6 +1040,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
       + L" attachment=" + std::wstring(modelAttachmentStatus == tf2::native::ModelFeatureStatus::Available ? L"available" : modelAttachmentStatus == tf2::native::ModelFeatureStatus::Missing ? L"missing" : L"unknown")
       + L" bodygroup=" + std::wstring(modelBodygroupStatus == tf2::native::ModelFeatureStatus::Available ? L"available" : modelBodygroupStatus == tf2::native::ModelFeatureStatus::Missing ? L"missing" : L"unknown")
       + L" viewmodel=" + std::wstring(modelViewModelStatus == tf2::native::ModelFeatureStatus::Available ? L"available" : modelViewModelStatus == tf2::native::ModelFeatureStatus::Missing ? L"missing" : L"unknown")
+      + L" entityMeshes=" + std::to_wstring(renderer.entityModelMeshCount())
+      + L" entityModels=" + std::to_wstring(renderer.entityModelInstanceCount())
+      + L" entityModelVerts=" + std::to_wstring(renderer.entityModelVertexCount())
       + L" posePreflight=" + (modelPosePreflight ? L"ready" : L"unknown")
       + L" bones=" + std::to_wstring(modelBoneCount)
       + L" attachments=" + std::to_wstring(modelAttachmentCount)
@@ -1042,6 +1087,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     if (!uploadedWorld && !worldTextures.empty()) uploadedWorld = renderer.uploadWorldGeometry(displayMap, worldTextures);
     if (!uploadedWorld) uploadedWorld = renderer.uploadWorldGeometry(displayMap, mapMaterialName, mapWidth, mapHeight);
     const bool uploadedModel = !modelReady || renderer.uploadBindPoseModel(modelMetadata.bindPoseVertices);
+    for (const auto& prepared : preparedEntityMeshes) {
+      renderer.uploadEntityModelMesh(prepared.cacheKey, prepared.vertices);
+    }
     bool uploadedBones = true;
     if (modelReady && !modelMetadata.bones.empty()) {
       std::vector<std::array<float, 16>> boneMatrices;
@@ -1180,51 +1228,70 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
       entitySnapshotStatus = tf2::native::queryEntitySnapshotAtOrBeforeTick(
           demoNetworkSummary, g_playback.tick, currentEntityStates);
       if (entitySnapshotStatus == tf2::native::EntitySnapshotQueryStatus::Available) {
-        std::vector<tf2::native::EntityMarker> entityMarkers;
-        entityMarkers.reserve(128);
+        const auto modelInstances = tf2::native::EntityModelResolver::buildInstances(
+          modelRenderRequests, currentEntityStates, demoNetworkSummary.serverClassSchemas, 256);
+        std::vector<tf2::native::EntityModelDrawInstance> draws;
+        std::vector<tf2::native::EntityMarker> fallbackMarkers;
+        draws.reserve(96);
+        fallbackMarkers.reserve(32);
         bool focused = false;
-        const auto tryFocusEntity = [&](std::size_t entityIndex) {
-          if (entityIndex >= currentEntityStates.size()) return false;
-          const auto& entity = currentEntityStates[entityIndex];
-          bool playerClass = entity.classId >= 0 &&
-            static_cast<std::size_t>(entity.classId) < demoNetworkSummary.serverClassSchemas.size();
-          if (playerClass) {
-            const auto& entityClassName = demoNetworkSummary.serverClassSchemas[static_cast<std::size_t>(entity.classId)].name;
-            playerClass = entityClassName.find("Player") != std::string::npos || entityClassName.find("TFPlayer") != std::string::npos;
-          }
-          if (!playerClass) return false;
-          const auto origin = entity.properties.find("m_vecOrigin");
-          if (origin == entity.properties.end() || origin->second.type != tf2::native::SendPropType::Vector) return false;
-          if (!std::isfinite(origin->second.x) || !std::isfinite(origin->second.y) || !std::isfinite(origin->second.z)) return false;
-          renderer.setObserverFocusWorld(origin->second.x, origin->second.y, origin->second.z);
-          if (entityMarkers.size() < 128) {
-            tf2::native::EntityMarker marker;
-            marker.position[0] = origin->second.x;
-            marker.position[1] = origin->second.y;
-            marker.position[2] = origin->second.z;
-            marker.color[0] = 0.2f; marker.color[1] = 0.95f; marker.color[2] = 0.35f; marker.color[3] = 0.0f;
-            entityMarkers.push_back(marker);
-          }
+        const auto tryFocusOrigin = [&](float x, float y, float z) {
+          if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
+          renderer.setObserverFocusWorld(x, y, z);
           return true;
         };
         if (demoNetworkSummary.lastViewEntity < currentEntityStates.size()) {
-          focused = tryFocusEntity(demoNetworkSummary.lastViewEntity);
+          const auto focus = tf2::native::EntityModelResolver::extractTransform(
+            currentEntityStates[demoNetworkSummary.lastViewEntity]);
+          if (focus.hasOrigin) focused = tryFocusOrigin(focus.origin[0], focus.origin[1], focus.origin[2]);
         }
-        for (std::size_t entityIndex = 0; !focused && entityIndex < currentEntityStates.size(); ++entityIndex) {
-          focused = tryFocusEntity(entityIndex);
+        for (const auto& instance : modelInstances) {
+          if (!instance.transform.hasOrigin) continue;
+          const bool player = instance.className.find("Player") != std::string::npos
+            || instance.className.find("TFPlayer") != std::string::npos
+            || instance.playerClassFallback;
+          if (!focused && player) {
+            focused = tryFocusOrigin(instance.transform.origin[0], instance.transform.origin[1], instance.transform.origin[2]);
+          }
+          if (instance.viewModelSkipped) continue;
+          std::string cacheKey = instance.cacheKey;
+          if (cacheKey.empty() || entityMeshKeyByPath.count(instance.modelPath)) {
+            const auto found = entityMeshKeyByPath.find(instance.modelPath);
+            if (found != entityMeshKeyByPath.end()) cacheKey = found->second;
+          }
+          const bool hasMesh = !cacheKey.empty() && !instance.viewModelSkipped
+            && (instance.renderable || instance.playerClassFallback);
+          if (hasMesh && draws.size() < 96) {
+            tf2::native::EntityModelDrawInstance draw;
+            draw.cacheKey = cacheKey;
+            draw.origin[0] = instance.transform.origin[0];
+            draw.origin[1] = instance.transform.origin[1];
+            draw.origin[2] = instance.transform.origin[2];
+            draw.hasAngles = instance.transform.hasAngles;
+            draw.angles[0] = instance.transform.angles[0];
+            draw.angles[1] = instance.transform.angles[1];
+            draw.angles[2] = instance.transform.angles[2];
+            if (instance.transform.hasTeam && instance.transform.team == 2) {
+              draw.color[0] = 0.86f; draw.color[1] = 0.28f; draw.color[2] = 0.22f; draw.color[3] = 1.0f;
+            } else if (instance.transform.hasTeam && instance.transform.team == 3) {
+              draw.color[0] = 0.28f; draw.color[1] = 0.52f; draw.color[2] = 0.86f; draw.color[3] = 1.0f;
+            } else {
+              draw.color[0] = 0.72f; draw.color[1] = 0.74f; draw.color[2] = 0.70f; draw.color[3] = 1.0f;
+            }
+            draws.push_back(draw);
+          } else if (fallbackMarkers.size() < 32) {
+            tf2::native::EntityMarker marker;
+            marker.position[0] = instance.transform.origin[0];
+            marker.position[1] = instance.transform.origin[1];
+            marker.position[2] = instance.transform.origin[2];
+            marker.color[0] = 0.95f; marker.color[1] = 0.75f; marker.color[2] = 0.15f; marker.color[3] = 0.0f;
+            fallbackMarkers.push_back(marker);
+          }
         }
-        for (std::size_t entityIndex = 0; entityIndex < currentEntityStates.size() && entityMarkers.size() < 128; ++entityIndex) {
-          const auto& entity = currentEntityStates[entityIndex];
-          const auto origin = entity.properties.find("m_vecOrigin");
-          if (origin == entity.properties.end() || origin->second.type != tf2::native::SendPropType::Vector) continue;
-          if (!std::isfinite(origin->second.x) || !std::isfinite(origin->second.y) || !std::isfinite(origin->second.z)) continue;
-          tf2::native::EntityMarker marker;
-          marker.position[0] = origin->second.x; marker.position[1] = origin->second.y; marker.position[2] = origin->second.z;
-          marker.color[0] = 0.95f; marker.color[1] = 0.75f; marker.color[2] = 0.15f; marker.color[3] = 0.0f;
-          entityMarkers.push_back(marker);
-        }
-        renderer.setEntityMarkers(entityMarkers);
+        renderer.setEntityModelInstances(draws);
+        renderer.setEntityMarkers(fallbackMarkers);
       } else {
+        renderer.setEntityModelInstances({});
         renderer.setEntityMarkers({});
       }
       renderer.setProjectileTimeline(demoNetworkSummary.projectileTimeline, g_playback.tick);
