@@ -16,7 +16,7 @@
 namespace tf2::native {
 
 namespace {
-struct WorldVertex { float x, y, z; float r, g, b, a; float u, v; float nx, ny, nz; };
+struct WorldVertex { float x, y, z; float r, g, b, a; float u, v; float nx, ny, nz; float lu = -1.0f; float lv = -1.0f; };
 struct EntityModelGpuVertex { float x, y, z; float nx, ny, nz; float u, v; };
 struct EntityModelInstanceGpu {
   float position[3][4];
@@ -184,9 +184,9 @@ cbuffer WorldConstants : register(b0) {
   float4 materialFeatures;
   float4 lightmapFeatures;
 };
-struct Input { float3 position : POSITION; float4 colour : COLOR0; float2 uv : TEXCOORD0; float3 normal : NORMAL0; };
-struct Output { float4 position : SV_POSITION; float4 colour : COLOR0; float2 uv : TEXCOORD0; float3 normal : NORMAL0; float3 worldPosition : TEXCOORD1; };
-Output main(Input input) { Output output; output.position = mul(float4(input.position, 1.0), mvp); output.colour = input.colour; output.uv = input.uv; output.normal = input.normal; output.worldPosition = input.position; return output; }
+struct Input { float3 position : POSITION; float4 colour : COLOR0; float2 uv : TEXCOORD0; float3 normal : NORMAL0; float2 lightUv : TEXCOORD1; };
+struct Output { float4 position : SV_POSITION; float4 colour : COLOR0; float2 uv : TEXCOORD0; float3 normal : NORMAL0; float3 worldPosition : TEXCOORD2; float2 lightUv : TEXCOORD3; };
+Output main(Input input) { Output output; output.position = mul(float4(input.position, 1.0), mvp); output.colour = input.colour; output.uv = input.uv; output.normal = input.normal; output.worldPosition = input.position; output.lightUv = input.lightUv; return output; }
 )HLSL";
   static constexpr char worldPixelSource[] = R"HLSL(
 cbuffer WorldConstants : register(b0) {
@@ -199,17 +199,20 @@ cbuffer WorldConstants : register(b0) {
 Texture2D texture0 : register(t0);
 Texture2D bumpTexture : register(t1);
 Texture2D envTexture : register(t2);
+Texture2D lightmapTexture : register(t3);
 SamplerState sampler0 : register(s0);
 float3 safeNormalize(float3 value) {
   float lengthSquared = dot(value, value);
   if (!(lengthSquared > 1e-8) || !(lengthSquared < 1e8)) return float3(0.0, 0.0, 0.0);
   return value * rsqrt(lengthSquared);
 }
-float4 main(float4 position : SV_POSITION, float4 colour : COLOR0, float2 uv : TEXCOORD0, float3 normal : NORMAL0, float3 worldPosition : TEXCOORD1) : SV_TARGET {
+float4 main(float4 position : SV_POSITION, float4 colour : COLOR0, float2 uv : TEXCOORD0, float3 normal : NORMAL0, float3 worldPosition : TEXCOORD2, float2 lightUv : TEXCOORD3) : SV_TARGET {
   float3 sampled = texture0.Sample(sampler0, uv).rgb;
   float lightmapFactor = max(lightmapFeatures.x, 0.0);
   float3 albedo = lerp(colour.rgb, sampled * colour.rgb, colour.a);
-  albedo *= lightmapFactor;
+  float3 lightColour = float3(lightmapFactor, lightmapFactor, lightmapFactor);
+  if (lightmapFeatures.w > 0.5 && lightUv.x >= 0.0) lightColour = lightmapTexture.Sample(sampler0, lightUv).rgb;
+  albedo *= lightColour;
   float3 n = safeNormalize(normal);
   if (lightmapFeatures.y > 0.5) {
     float3 bump = bumpTexture.Sample(sampler0, uv).xyz * 2.0 - 1.0;
@@ -301,7 +304,8 @@ struct Output {
   float4 colour : COLOR0;
   float2 uv : TEXCOORD0;
   float3 normal : NORMAL0;
-  float3 worldPosition : TEXCOORD1;
+  float3 worldPosition : TEXCOORD2;
+  float2 lightUv : TEXCOORD3;
 };
 Output main(Input input) {
   Output output;
@@ -314,6 +318,7 @@ Output main(Input input) {
   float lengthSquared = dot(rotated, rotated);
   output.normal = (lengthSquared > 1e-8 && lengthSquared < 1e8) ? rotated * rsqrt(lengthSquared) : float3(0.0, 0.0, 1.0);
   output.worldPosition = mapped;
+  output.lightUv = float2(-1.0, -1.0);
   return output;
 }
 )HLSL";
@@ -353,8 +358,9 @@ Output main(Input input) {
       {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
       {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0},
       {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 36, D3D11_INPUT_PER_VERTEX_DATA, 0},
+      {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, 48, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
-    const bool layoutCreated = SUCCEEDED(device_->CreateInputLayout(worldElements, 4, worldVertexBytecode->GetBufferPointer(), worldVertexBytecode->GetBufferSize(), worldInputLayout_.GetAddressOf()));
+    const bool layoutCreated = SUCCEEDED(device_->CreateInputLayout(worldElements, 5, worldVertexBytecode->GetBufferPointer(), worldVertexBytecode->GetBufferSize(), worldInputLayout_.GetAddressOf()));
     if (!layoutCreated) {
       worldVertexShader_.Reset(); worldPixelShader_.Reset(); worldInputLayout_.Reset();
       lastError_ = E_FAIL;
@@ -495,6 +501,7 @@ bool Renderer::uploadWorldGeometry(const BspMap& map, const std::string& texture
     const float invWidth = textured ? 1.0f / static_cast<float>(textureWidth) : 0.0f;
     const float invHeight = textured ? 1.0f / static_cast<float>(textureHeight) : 0.0f;
     a.u = triangle.au * invWidth; a.v = triangle.av * invHeight; b.u = triangle.bu * invWidth; b.v = triangle.bv * invHeight; c.u = triangle.cu * invWidth; c.v = triangle.cv * invHeight;
+    if (triangle.lightmapped) { a.lu = triangle.alu; a.lv = triangle.alv; b.lu = triangle.blu; b.lv = triangle.blv; c.lu = triangle.clu; c.lv = triangle.clv; }
     vertices.push_back(a); vertices.push_back(b); vertices.push_back(c);
   }
   D3D11_BUFFER_DESC description{};
@@ -608,6 +615,7 @@ bool Renderer::uploadWorldGeometry(const BspMap& map, const std::vector<WorldTex
       a.u = atlasCoord(triangle.au, static_cast<float>(t.sourceWidth), t.x, t.width); a.v = atlasCoord(triangle.av, static_cast<float>(t.sourceHeight), t.y, t.height);
       b.u = atlasCoord(triangle.bu, static_cast<float>(t.sourceWidth), t.x, t.width); b.v = atlasCoord(triangle.bv, static_cast<float>(t.sourceHeight), t.y, t.height);
       c.u = atlasCoord(triangle.cu, static_cast<float>(t.sourceWidth), t.x, t.width); c.v = atlasCoord(triangle.cv, static_cast<float>(t.sourceHeight), t.y, t.height);
+      if (triangle.lightmapped) { a.lu = triangle.alu; a.lv = triangle.alv; b.lu = triangle.blu; b.lv = triangle.blv; c.lu = triangle.clu; c.lv = triangle.clv; }
     } else {
       const std::uint32_t hash = static_cast<std::uint32_t>(std::hash<std::string>{}(triangle.material));
       const float shade = 0.78f + static_cast<float>(hash % 23) / 100.0f;
@@ -650,6 +658,17 @@ bool Renderer::uploadWorldAuxTextures(const std::vector<std::uint8_t>& bumpRgba,
   error.clear();
   if (!envRgba.empty() && !worldEnvTexture_.create(device_.Get(), envRgba, envWidth, envHeight, &error)) {
     if (!error.empty()) OutputDebugStringA(("Env Texture2D upload failed: " + error + "\n").c_str());
+    return false;
+  }
+  return true;
+}
+
+bool Renderer::uploadWorldLightmap(const std::vector<std::uint8_t>& rgba, UINT width, UINT height) {
+  worldLightmapTexture_.reset();
+  if (rgba.empty() || width == 0 || height == 0) return true;
+  std::string error;
+  if (!worldLightmapTexture_.create(device_.Get(), rgba, width, height, &error)) {
+    if (!error.empty()) OutputDebugStringA(("Lightmap Texture2D upload failed: " + error + "\n").c_str());
     return false;
   }
   return true;
@@ -836,6 +855,7 @@ WorldMaterialSampleState Renderer::worldMaterialSampleState() const {
   state.lightmapIntensity = worldLightmapIntensity_;
   state.bumpTextureBound = worldBumpTexture_.view() != nullptr;
   state.envTextureBound = worldEnvTexture_.view() != nullptr;
+  state.lightmapAtlasBound = worldLightmapTexture_.view() != nullptr;
   state.selfIllumEnabled = worldMaterialParams_.selfIllum;
   return state;
 }
@@ -1241,9 +1261,11 @@ bool Renderer::draw(float clearRed, float clearGreen, float clearBlue) {
       worldLightmapStatus_ == WorldLightmapStatus::Unavailable ? 1.0f : worldLightmapIntensity_,
       settings_.preset == QualityPreset::Standard && worldMaterialParams_.bumpMapping && worldBumpTexture_.view() ? 1.0f : 0.0f,
       settings_.preset == QualityPreset::Standard && worldMaterialParams_.envMap && worldEnvTexture_.view() ? 1.0f : 0.0f,
-      0.0f);
+      worldLightmapTexture_.view() ? 1.0f : 0.0f);
     context_->UpdateSubresource(worldConstants_.Get(), 0, nullptr, &constants, 0, 0);
   }
+  auto* lightView = worldLightmapTexture_.view();
+  context_->PSSetShaderResources(3, 1, &lightView);
   const bool hasWorldGeometry = worldVertexBuffer_ && worldVertexCount_ > 0;
   if (worldVertexShader_ && worldPixelShader_ && worldInputLayout_ && hasWorldGeometry) {
     const UINT stride = sizeof(WorldVertex), offset = 0;
@@ -1369,6 +1391,7 @@ void Renderer::shutdown() {
   worldTexture_.reset();
   worldBumpTexture_.reset();
   worldEnvTexture_.reset();
+  worldLightmapTexture_.reset();
   worldVertexBuffer_.Reset();
   projectileVertexBuffer_.Reset();
   projectileVertexCapacity_ = 0;

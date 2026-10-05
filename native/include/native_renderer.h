@@ -94,6 +94,7 @@ struct WorldMaterialSampleState {
   float lightmapIntensity = 1.0f;
   bool bumpTextureBound = false;
   bool envTextureBound = false;
+  bool lightmapAtlasBound = false;
   bool selfIllumEnabled = false;
 };
 
@@ -132,6 +133,7 @@ public:
   bool uploadWorldGeometry(const BspMap& map, const std::vector<WorldTexture>& textures);
   bool uploadWorldAuxTextures(const std::vector<std::uint8_t>& bumpRgba, UINT bumpWidth, UINT bumpHeight,
     const std::vector<std::uint8_t>& envRgba, UINT envWidth, UINT envHeight);
+  bool uploadWorldLightmap(const std::vector<std::uint8_t>& rgba, UINT width, UINT height);
   bool uploadProjectileLines(const std::vector<ProjectileLine>& lines);
   bool uploadBindPoseModel(const std::vector<ModelDrawVertex>& vertices);
   bool uploadBoneMatrices(const std::vector<std::array<float, 16>>& boneMatrices, bool enableSkinning);
@@ -213,6 +215,7 @@ private:
   Texture2D worldTexture_;
   Texture2D worldBumpTexture_;
   Texture2D worldEnvTexture_;
+  Texture2D worldLightmapTexture_;
   RenderSettings settings_{};
   float cameraYaw_ = 0.0f;
   float cameraPitch_ = 0.36f;
