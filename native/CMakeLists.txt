@@ -20,6 +20,8 @@ add_executable(tf2_demo_native WIN32
   src/audio_player.cpp
   src/audio_timeline.cpp
   src/effects_timeline.cpp
+  src/pcf_operators.cpp
+  src/playback_hud.cpp
   src/bsp_map.cpp
   third_party/lzma/LzmaDec.c
   src/texture2d.cpp
@@ -79,6 +81,12 @@ set_target_properties(entity_model_probe PROPERTIES WIN32_EXECUTABLE OFF)
 add_executable(viewmodel_fov_probe tools/viewmodel_fov_probe.cpp)
 target_include_directories(viewmodel_fov_probe PRIVATE include)
 set_target_properties(viewmodel_fov_probe PROPERTIES WIN32_EXECUTABLE OFF)
+
+add_executable(audio_effects_probe tools/audio_effects_probe.cpp src/audio_player.cpp src/audio_timeline.cpp src/audio_resource.cpp src/effects_timeline.cpp src/pcf_operators.cpp src/playback_hud.cpp src/vpk_archive.cpp third_party/lzma/LzmaDec.c)
+target_include_directories(audio_effects_probe PRIVATE include third_party/lzma)
+target_compile_definitions(audio_effects_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(audio_effects_probe PRIVATE winmm)
+set_target_properties(audio_effects_probe PROPERTIES WIN32_EXECUTABLE OFF)
 
 add_executable(audio_scheduler_probe tools/audio_scheduler_probe.cpp src/audio_player.cpp src/audio_timeline.cpp src/audio_resource.cpp src/vpk_archive.cpp)
 target_include_directories(audio_scheduler_probe PRIVATE include)

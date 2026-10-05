@@ -7,6 +7,8 @@
 #include "bsp_map.h"
 #include "demo_header.h"
 #include "audio_player.h"
+#include "effects_timeline.h"
+#include "playback_hud.h"
 #include "model_loader.h"
 #include "entity_model.h"
 #include "item_schema.h"
@@ -410,15 +412,6 @@ std::filesystem::path localCacheDirectory(std::string& status) {
   return {};
 }
 
-bool isVoiceOrMusic(const std::string& name) {
-  std::string lower = name;
-  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  return lower.find("vo/") != std::string::npos || lower.find("voice") != std::string::npos
-    || lower.find("announcer") != std::string::npos || lower.find("commentary") != std::string::npos
-    || lower.find("radio") != std::string::npos || lower.find("music") != std::string::npos;
-}
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
@@ -806,19 +799,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     [](const auto& entry) { return entry.command == 1 || entry.command == 2; });
   if (firstPacket != demoIndex.entries.end()) firstPacketTick = firstPacket->tick;
   for (const auto& source : demoNetworkSummary.decodedSoundEvents) {
-    if (source.resourceName.empty() || isVoiceOrMusic(source.resourceName)) continue;
-    tf2::native::SoundPlaybackEvent event;
-    event.tick = std::max<std::int32_t>(0, source.tick - firstPacketTick);
-    event.soundIndex = source.soundIndex;
-    event.name = source.resourceName;
-    event.skipVoice = false;
-    event.volume = std::clamp(source.volume, 0.0f, 1.0f);
-    event.origin[0] = source.origin[0];
-    event.origin[1] = source.origin[1];
-    event.origin[2] = source.origin[2];
-    soundTimeline.add(std::move(event));
+    if (source.resourceName.empty()) continue;
+    tf2::native::ScheduledSound sound;
+    sound.tick = std::max<std::int32_t>(0, source.tick - firstPacketTick);
+    sound.soundIndex = source.soundIndex;
+    sound.name = source.resourceName;
+    sound.volume = source.volume;
+    sound.delaySeconds = source.delaySeconds;
+    sound.origin[0] = source.origin[0];
+    sound.origin[1] = source.origin[1];
+    sound.origin[2] = source.origin[2];
+    tf2::native::scheduleGameplaySound(soundTimeline, std::move(sound), g_playback.tickRate);
   }
   soundTimeline.sortByTick();
+  const tf2::native::SoundKindCounts soundKindCounts = tf2::native::countSoundKinds(soundTimeline);
+  tf2::native::TempEffectTimeline effectTimeline;
+  for (const auto& source : demoNetworkSummary.tempEntityEvents) {
+    tf2::native::addFireBulletsEvent(source, effectTimeline);
+    tf2::native::addExplosionEvent(source, effectTimeline);
+    tf2::native::addParticleEvent(source, effectTimeline);
+  }
+  effectTimeline.sortByTick();
   tf2::native::AudioEventScheduler soundScheduler;
   soundScheduler.setDeviceId(audioDevice);
   std::unordered_map<std::string, tf2::native::WavPcmData> soundCache;
@@ -1016,6 +1017,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   std::size_t hudAudioPlayed = 0;
   std::size_t hudAudioMissing = 0;
   std::size_t hudTrailVertices = 0;
+  std::size_t hudEffectsDue = 0;
+  tf2::native::PlaybackHudState hudState;
   const auto refreshWindowTitle = [&]() {
     if (!g_playback.enabled) {
       SetWindowTextW(window, titleBase.c_str());
@@ -1038,6 +1041,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
       + L" speed=" + std::to_wstring(g_playback.speed)
       + L" entity=" + std::wstring(entitySnapshotStatusName(entitySnapshotStatus))
       + L" audio=" + std::to_wstring(hudAudioPlayed) + L"/" + std::to_wstring(hudAudioMissing)
+      + L" health=" + (hudState.healthKnown ? std::to_wstring(hudState.health) : L"?")
+      + L" team=" + (hudState.teamKnown ? std::to_wstring(hudState.team) : L"?")
+      + L" class=" + (hudState.classKnown ? std::to_wstring(hudState.playerClass) : L"?")
+      + L" clip=" + (hudState.clipKnown ? std::to_wstring(hudState.clip) : L"?")
+      + L" uber=" + (hudState.uberKnown ? std::to_wstring(hudState.uberCharge) : L"?")
+      + L" snd=" + std::to_wstring(soundKindCounts.weapon) + L"/"
+      + std::to_wstring(soundKindCounts.footstep) + L"/" + std::to_wstring(soundKindCounts.uber)
+      + L" fxDue=" + std::to_wstring(hudEffectsDue)
       + L" trailVerts=" + std::to_wstring(hudTrailVertices) + L"/1024"
       + L" cache=" + std::wstring(cacheStatus.begin(), cacheStatus.end())
       + (cacheDirectory.empty() ? L"" : L"@" + cacheDirectory.wstring())
@@ -1248,6 +1259,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
       }
       const bool snapshotDrawable = entitySnapshotStatus == tf2::native::EntitySnapshotQueryStatus::Available
           || entitySnapshotStatus == tf2::native::EntitySnapshotQueryStatus::Checkpoint;
+      hudState = snapshotDrawable
+        ? tf2::native::readPlaybackHud(currentEntityStates, demoNetworkSummary.lastViewEntity)
+        : tf2::native::PlaybackHudState{};
+      hudEffectsDue = effectTimeline.countThrough(sceneTick);
       if (snapshotDrawable) {
         const auto modelInstances = tf2::native::EntityModelResolver::buildInstances(
           modelRenderRequests, currentEntityStates, demoNetworkSummary.serverClassSchemas, 256);
