@@ -799,6 +799,7 @@ void Renderer::releaseTarget() { depthStencilView_.Reset(); depthTexture_.Reset(
 
 void Renderer::orbitCamera(float deltaX, float deltaY) {
   if (!std::isfinite(deltaX) || !std::isfinite(deltaY)) return;
+  observerDemoView_ = false;
   constexpr float kPi = 3.14159265358979323846f;
   const float yaw = std::remainder(cameraYaw_ + deltaX * 0.008f, kPi * 2.0f);
   const float pitch = cameraPitch_ + deltaY * 0.008f;
@@ -837,6 +838,20 @@ bool Renderer::observerFocusWorld(float& x, float& y, float& z) const {
   if (!observerFocusValid_) return false;
   x = observerFocusX_; y = observerFocusY_; z = observerFocusZ_;
   return true;
+}
+
+void Renderer::clearObserverDemoView() { observerDemoView_ = false; }
+
+void Renderer::setObserverDemoViewWorld(float x, float y, float z, float pitchDegrees, float yawDegrees) {
+  if (!std::isfinite(pitchDegrees) || !std::isfinite(yawDegrees)) return;
+  setObserverFocusWorld(x, y, z);
+  if (!observerFocusValid_) { observerDemoView_ = false; return; }
+  observerDemoView_ = true;
+  observerDemoEyeX_ = observerFocusX_;
+  observerDemoEyeY_ = observerFocusY_;
+  observerDemoEyeZ_ = observerFocusZ_;
+  observerDemoPitchDeg_ = pitchDegrees;
+  observerDemoYawDeg_ = yawDegrees;
 }
 
 void Renderer::setWorldMaterialParams(const WorldMaterialParams& params) {
@@ -1192,6 +1207,7 @@ void Renderer::resetCamera() {
   cameraYaw_ = 0.0f;
   cameraPitch_ = 0.36f;
   cameraDistance_ = 1.65f;
+  observerDemoView_ = false;
   observerFocusValid_ = false;
   observerFocusX_ = 0.0f;
   observerFocusY_ = 0.0f;
@@ -1224,16 +1240,25 @@ bool Renderer::draw(float clearRed, float clearGreen, float clearBlue) {
   context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   if (worldConstants_) {
     using namespace DirectX;
-    const XMVECTOR target = XMVectorSet(
+    XMVECTOR target = XMVectorSet(
       observerFocusValid_ ? observerFocusX_ : 0.0f,
       observerFocusValid_ ? observerFocusY_ : 0.0f,
       observerFocusValid_ ? observerFocusZ_ : 0.5f, 1.0f);
-    const float horizontal = std::cos(cameraPitch_) * cameraDistance_;
-    const XMVECTOR eye = XMVectorSet(
-      XMVectorGetX(target) + std::cos(cameraYaw_) * horizontal,
-      XMVectorGetY(target) + std::sin(cameraYaw_) * horizontal,
-      XMVectorGetZ(target) + std::sin(cameraPitch_) * cameraDistance_, 1.0f);
-    const XMVECTOR up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    XMVECTOR eye;
+    XMVECTOR up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    if (observerDemoView_) {
+      float forward[3] = {};
+      demoViewForward(observerDemoPitchDeg_, observerDemoYawDeg_, forward);
+      eye = XMVectorSet(observerDemoEyeX_, observerDemoEyeY_, observerDemoEyeZ_, 1.0f);
+      target = XMVectorSet(observerDemoEyeX_ + forward[0], observerDemoEyeY_ + forward[1], observerDemoEyeZ_ + forward[2], 1.0f);
+      if (std::fabs(forward[2]) > 0.95f) up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    } else {
+      const float horizontal = std::cos(cameraPitch_) * cameraDistance_;
+      eye = XMVectorSet(
+        XMVectorGetX(target) + std::cos(cameraYaw_) * horizontal,
+        XMVectorGetY(target) + std::sin(cameraYaw_) * horizontal,
+        XMVectorGetZ(target) + std::sin(cameraPitch_) * cameraDistance_, 1.0f);
+    }
     const XMMATRIX view = XMMatrixLookAtLH(eye, target, up);
     const float aspect = height_ == 0 ? 1.0f : static_cast<float>(width_) / static_cast<float>(height_);
     const XMMATRIX projection = XMMatrixPerspectiveFovLH(XMConvertToRadians(settings_.viewModelFov), aspect, 0.05f, 100.0f);

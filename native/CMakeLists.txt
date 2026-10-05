@@ -59,6 +59,10 @@ add_executable(world_material_probe tools/world_material_probe.cpp src/bsp_map.c
 target_include_directories(world_material_probe PRIVATE include third_party/lzma)
 set_target_properties(world_material_probe PROPERTIES WIN32_EXECUTABLE OFF)
 
+add_executable(presentation_probe tools/presentation_probe.cpp src/demo_header.cpp third_party/lzma/LzmaDec.c)
+target_include_directories(presentation_probe PRIVATE include third_party/lzma)
+set_target_properties(presentation_probe PROPERTIES WIN32_EXECUTABLE OFF)
+
 add_executable(texture_quad_probe tools/texture_quad_probe.cpp src/vtf_texture.cpp)
 target_include_directories(texture_quad_probe PRIVATE include)
 target_link_libraries(texture_quad_probe PRIVATE d3d11 d3dcompiler)

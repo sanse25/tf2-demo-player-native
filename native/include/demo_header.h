@@ -148,6 +148,14 @@ struct TempEntityEvent {
   std::int64_t radius = 0;
   bool hasParticleName = false;
   std::string particleName;
+  bool hasVelocity = false;
+  float velocity[3] = {};
+  bool hasModelIndex = false;
+  std::int64_t modelIndex = 0;
+  bool hasOwner = false;
+  std::int64_t owner = 0;
+  bool hasLifeTime = false;
+  std::int64_t lifeTime = 0;
   std::unordered_map<std::string, EntityPropertyValue> properties;
 };
 
@@ -168,6 +176,14 @@ struct ProjectileTimelineEvent {
   std::int64_t scale = 0;
   bool hasRadius = false;
   std::int64_t radius = 0;
+  bool hasVelocity = false;
+  float velocity[3] = {};
+  bool hasModelIndex = false;
+  std::int64_t modelIndex = 0;
+  bool hasOwner = false;
+  std::int64_t owner = 0;
+  bool hasLifeTime = false;
+  std::int64_t lifeTime = 0;
 };
 
 struct AssetReference {
@@ -217,12 +233,41 @@ struct EntityHistoryPacket {
   bool isDelta = false;
 };
 
+struct EntityHistoryLimits {
+  std::size_t maxEvents = 8192;
+  std::size_t maxCheckpoints = 8;
+  std::size_t checkpointStride = 128;
+  std::size_t archiveMax = 96;
+};
+
 enum class EntitySnapshotQueryStatus {
   Available,
+  Checkpoint,
   NoHistory,
   TickBeforeHistory,
   Gap,
   DeltaBaseMissing,
+};
+
+enum class DemoViewSource : std::uint8_t { None = 0, CmdInfo = 1, FixAngle = 2 };
+
+struct DemoViewSample {
+  std::int32_t tick = 0;
+  float origin[3] = {};
+  float angles[3] = {};
+  bool hasOrigin = false;
+  bool hasAngles = false;
+  DemoViewSource source = DemoViewSource::None;
+};
+
+enum class DemoRecordingKind { Unknown, SourceTv, Pov };
+
+struct DemoRecordingClassification {
+  DemoRecordingKind kind = DemoRecordingKind::Unknown;
+  bool headerName = false;
+  bool serverInfoHltv = false;
+  bool serverInfoReplayBit = false;
+  const char* label = "unknown";
 };
 
 struct DemoNetworkSummary {
@@ -234,6 +279,12 @@ struct DemoNetworkSummary {
   std::size_t classInfoCount = 0;
   std::size_t setViewCount = 0;
   std::uint32_t lastViewEntity = 0;
+  std::vector<DemoViewSample> viewSamples;
+  std::size_t viewSamplesDropped = 0;
+  std::size_t fixAngleDecoded = 0;
+  float lastFixAngle[3] = {};
+  bool lastFixAngleValid = false;
+  bool lastFixAngleRelative = false;
   std::uint32_t serverClassCount = 0;
   std::vector<std::string> serverClassNames;
   std::vector<std::string> serverDataTableNames;
@@ -355,6 +406,11 @@ struct DemoNetworkSummary {
   std::size_t entityHistoryDeltaBaseMisses = 0;
   bool entityHistoryHasGap = false;
   std::int32_t entityHistoryGapTick = 0;
+  std::vector<EntityHistoryCheckpoint> entityHistoryArchive;
+  EntityHistoryLimits entityHistoryLimits{};
+  bool serverInfoHltv = false;
+  bool serverInfoDedicated = false;
+  bool serverInfoReplayBit = false;
   std::size_t entityOriginStateCount = 0;
   std::size_t entityHealthStateCount = 0;
   std::size_t entityTeamStateCount = 0;
@@ -430,7 +486,16 @@ bool findEntitySnapshotAtOrBeforeTick(const DemoNetworkSummary& summary, std::in
                                       std::vector<EntityState>& states);
 EntitySnapshotQueryStatus queryEntitySnapshotAtOrBeforeTick(
     const DemoNetworkSummary& summary, std::int32_t tick, std::vector<EntityState>& states);
+void appendEntityHistoryPacket(DemoNetworkSummary& summary, std::int32_t tick, bool isDelta,
+                               std::int32_t deltaFrom, std::vector<EntityHistoryEvent> events);
 bool findTempEntityEventsInTickRange(const DemoNetworkSummary& summary, std::int32_t firstTick,
                                      std::int32_t lastTick, std::vector<TempEntityEvent>& events);
+bool parseDemoCmdInfo(const std::uint8_t* bytes, std::size_t size, DemoViewSample& sample);
+float demoBitAngleToDegrees(std::uint32_t raw, int width);
+void demoViewForward(float pitchDegrees, float yawDegrees, float out[3]);
+bool findObserverViewAtOrBeforeTick(const DemoNetworkSummary& summary, std::int32_t tick, DemoViewSample& sample);
+DemoRecordingClassification classifyDemoRecording(const DemoHeader& header, const DemoNetworkSummary& summary);
+void applyTempEntityFields(TempEntityEvent& event);
+bool projectileFromTempEntity(const TempEntityEvent& event, ProjectileTimelineEvent& timeline);
 
 } // namespace tf2::native

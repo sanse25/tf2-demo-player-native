@@ -87,6 +87,7 @@ constexpr double kTargetFrameSeconds = 1.0 / 120.0;
 const wchar_t* entitySnapshotStatusName(tf2::native::EntitySnapshotQueryStatus status) {
   switch (status) {
     case tf2::native::EntitySnapshotQueryStatus::Available: return L"available";
+    case tf2::native::EntitySnapshotQueryStatus::Checkpoint: return L"checkpoint";
     case tf2::native::EntitySnapshotQueryStatus::NoHistory: return L"no-history";
     case tf2::native::EntitySnapshotQueryStatus::TickBeforeHistory: return L"before-window";
     case tf2::native::EntitySnapshotQueryStatus::Gap: return L"gap";
@@ -847,7 +848,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   std::wstring demoSuffix;
   if (!commandDemo.empty()) {
     if (demoHeader.valid) {
-      const char* typeName = tf2::native::demoRecordingTypeName(demoHeader.recordingType);
+      const auto recording = tf2::native::classifyDemoRecording(demoHeader, demoNetworkSummary);
+      const char* typeName = recording.label;
       demoSuffix = L" | Demo: " + std::wstring(demoHeader.mapName.begin(), demoHeader.mapName.end())
         + L" " + std::wstring(typeName, typeName + std::strlen(typeName))
         + L" ticks=" + std::to_wstring(demoHeader.ticks)
@@ -981,7 +983,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         + L" tables=" + std::to_wstring(demoNetworkSummary.stringTableCount)
         + L" table0=" + (demoNetworkSummary.stringTableNames.empty() ? L"" : std::wstring(demoNetworkSummary.stringTableNames.front().begin(), demoNetworkSummary.stringTableNames.front().end()))
         + L" servermap=" + std::wstring(demoNetworkSummary.serverMap.begin(), demoNetworkSummary.serverMap.end())
-        + L" stv=" + (demoNetworkSummary.sourceTv ? L"1" : L"0");
+        + L" stv=" + (demoNetworkSummary.serverInfoHltv ? L"1" : L"0")
+        + L" replaybit=" + (demoNetworkSummary.serverInfoReplayBit ? L"1" : L"0")
+        + L" views=" + std::to_wstring(demoNetworkSummary.viewSamples.size());
     } else {
       demoSuffix = L" | Demo error: " + std::wstring(demoHeader.error.begin(), demoHeader.error.end());
     }
@@ -1231,9 +1235,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
       }
     }
     if (g_renderer && g_playback.enabled && g_playback.tick != lastSceneTick) {
+      const std::int32_t sceneTick = firstPacketTick + g_playback.tick;
       entitySnapshotStatus = tf2::native::queryEntitySnapshotAtOrBeforeTick(
-          demoNetworkSummary, g_playback.tick, currentEntityStates);
-      if (entitySnapshotStatus == tf2::native::EntitySnapshotQueryStatus::Available) {
+          demoNetworkSummary, sceneTick, currentEntityStates);
+      tf2::native::DemoViewSample observerView;
+      if (tf2::native::findObserverViewAtOrBeforeTick(demoNetworkSummary, sceneTick, observerView)
+          && observerView.hasOrigin && observerView.hasAngles) {
+        renderer.setObserverDemoViewWorld(observerView.origin[0], observerView.origin[1], observerView.origin[2],
+          observerView.angles[0], observerView.angles[1]);
+      } else {
+        renderer.clearObserverDemoView();
+      }
+      const bool snapshotDrawable = entitySnapshotStatus == tf2::native::EntitySnapshotQueryStatus::Available
+          || entitySnapshotStatus == tf2::native::EntitySnapshotQueryStatus::Checkpoint;
+      if (snapshotDrawable) {
         const auto modelInstances = tf2::native::EntityModelResolver::buildInstances(
           modelRenderRequests, currentEntityStates, demoNetworkSummary.serverClassSchemas, 256);
         std::vector<tf2::native::EntityModelDrawInstance> draws;
@@ -1300,8 +1315,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         renderer.setEntityModelInstances({});
         renderer.setEntityMarkers({});
       }
-      renderer.setProjectileTimeline(demoNetworkSummary.projectileTimeline, g_playback.tick);
-      renderer.setCpuParticleTimeline(demoNetworkSummary.projectileTimeline, g_playback.tick);
+      renderer.setProjectileTimeline(demoNetworkSummary.projectileTimeline, sceneTick);
+      renderer.setCpuParticleTimeline(demoNetworkSummary.projectileTimeline, sceneTick);
       hudTrailVertices = renderer.projectileVertexCount();
       lastSceneTick = g_playback.tick;
     }
