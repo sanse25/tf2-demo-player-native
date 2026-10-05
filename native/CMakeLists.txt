@@ -82,6 +82,18 @@ add_executable(viewmodel_fov_probe tools/viewmodel_fov_probe.cpp)
 target_include_directories(viewmodel_fov_probe PRIVATE include)
 set_target_properties(viewmodel_fov_probe PROPERTIES WIN32_EXECUTABLE OFF)
 
+add_executable(animation_viewmodel_probe
+  tools/animation_viewmodel_probe.cpp
+  src/animation_decoder.cpp
+  src/viewmodel.cpp
+  src/model_loader.cpp
+  src/asset_root.cpp
+  src/vpk_archive.cpp
+  src/demo_header.cpp
+  src/item_schema.cpp)
+target_include_directories(animation_viewmodel_probe PRIVATE include)
+set_target_properties(animation_viewmodel_probe PROPERTIES WIN32_EXECUTABLE OFF)
+
 add_executable(audio_effects_probe tools/audio_effects_probe.cpp src/audio_player.cpp src/audio_timeline.cpp src/audio_resource.cpp src/effects_timeline.cpp src/pcf_operators.cpp src/playback_hud.cpp src/vpk_archive.cpp third_party/lzma/LzmaDec.c)
 target_include_directories(audio_effects_probe PRIVATE include third_party/lzma)
 target_compile_definitions(audio_effects_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
